@@ -31,14 +31,20 @@ import datetime
 from typing import Iterator
 from pyspark.sql import functions as F
 from pyspark.sql.types import (
-    StructType, StructField,
-    StringType, DoubleType, DateType, TimestampType, MapType
+    StructType,
+    StructField,
+    StringType,
+    DoubleType,
+    DateType,
+    TimestampType,
+    MapType,
 )
 import dlt
 
 ###############################################################################
 # Pipeline Parameters
 ###############################################################################
+
 
 # Injected via DLT pipeline configuration or spark.conf
 def get_pipeline_param(key: str, default: str = "") -> str:
@@ -48,10 +54,7 @@ def get_pipeline_param(key: str, default: str = "") -> str:
         return default
 
 
-BILLING_ROLE_ARNS_JSON: str = get_pipeline_param(
-    "billing_role_arns",
-    default="{}"
-)
+BILLING_ROLE_ARNS_JSON: str = get_pipeline_param("billing_role_arns", default="{}")
 
 # Format: { "ou_name": { "account_id": "role_arn", ... }, ... }
 BILLING_ROLE_ARNS: dict = json.loads(BILLING_ROLE_ARNS_JSON)
@@ -60,43 +63,42 @@ BILLING_ROLE_ARNS: dict = json.loads(BILLING_ROLE_ARNS_JSON)
 TODAY = datetime.date.today()
 QUERY_START: str = get_pipeline_param(
     "query_start",
-    default=TODAY.replace(day=1).isoformat()          # first day of this month
+    default=TODAY.replace(day=1).isoformat(),  # first day of this month
 )
-QUERY_END: str = get_pipeline_param(
-    "query_end",
-    default=TODAY.isoformat()
-)
+QUERY_END: str = get_pipeline_param("query_end", default=TODAY.isoformat())
 
 EXTERNAL_ID: str = get_pipeline_param(
-    "external_id",
-    default="databricks-billing-aggregator"
+    "external_id", default="databricks-billing-aggregator"
 )
 
-TARGET_CATALOG: str  = get_pipeline_param("target_catalog",  default="billing")
-TARGET_SCHEMA: str   = get_pipeline_param("target_schema",   default="aws_costs")
+TARGET_CATALOG: str = get_pipeline_param("target_catalog", default="billing")
+TARGET_SCHEMA: str = get_pipeline_param("target_schema", default="aws_costs")
 
 ###############################################################################
 # Schemas
 ###############################################################################
 
-BRONZE_SCHEMA = StructType([
-    StructField("ou",             StringType(),  False),
-    StructField("account_id",     StringType(),  False),
-    StructField("time_period_start", StringType(), False),
-    StructField("time_period_end",   StringType(), False),
-    StructField("service",        StringType(),  True),
-    StructField("region",         StringType(),  True),
-    StructField("usage_type",     StringType(),  True),
-    StructField("linked_account", StringType(),  True),
-    StructField("amount",         DoubleType(),  True),
-    StructField("unit",           StringType(),  True),
-    StructField("estimated",      StringType(),  True),
-    StructField("ingested_at",    TimestampType(), False),
-])
+BRONZE_SCHEMA = StructType(
+    [
+        StructField("ou", StringType(), False),
+        StructField("account_id", StringType(), False),
+        StructField("time_period_start", StringType(), False),
+        StructField("time_period_end", StringType(), False),
+        StructField("service", StringType(), True),
+        StructField("region", StringType(), True),
+        StructField("usage_type", StringType(), True),
+        StructField("linked_account", StringType(), True),
+        StructField("amount", DoubleType(), True),
+        StructField("unit", StringType(), True),
+        StructField("estimated", StringType(), True),
+        StructField("ingested_at", TimestampType(), False),
+    ]
+)
 
 ###############################################################################
 # Helper: AssumeRole and return boto3 Cost Explorer client
 ###############################################################################
+
 
 def get_ce_client(role_arn: str, account_id: str) -> "boto3.client":
     """
@@ -123,6 +125,7 @@ def get_ce_client(role_arn: str, account_id: str) -> "boto3.client":
 ###############################################################################
 # Helper: Paginate Cost Explorer GetCostAndUsage
 ###############################################################################
+
 
 def fetch_cost_and_usage(
     ce_client,
@@ -157,25 +160,25 @@ def fetch_cost_and_usage(
 
         for result in response.get("ResultsByTime", []):
             period_start = result["TimePeriod"]["Start"]
-            period_end   = result["TimePeriod"]["End"]
-            estimated    = str(result.get("Estimated", False))
+            period_end = result["TimePeriod"]["End"]
+            estimated = str(result.get("Estimated", False))
 
             for group in result.get("Groups", []):
-                keys      = group["Keys"]  # [service, region, usage_type, linked_account]
-                metrics   = group["Metrics"]["UnblendedCost"]
+                keys = group["Keys"]  # [service, region, usage_type, linked_account]
+                metrics = group["Metrics"]["UnblendedCost"]
                 yield {
-                    "ou":               ou,
-                    "account_id":       account_id,
+                    "ou": ou,
+                    "account_id": account_id,
                     "time_period_start": period_start,
-                    "time_period_end":   period_end,
-                    "service":          keys[0] if len(keys) > 0 else None,
-                    "region":           keys[1] if len(keys) > 1 else None,
-                    "usage_type":       keys[2] if len(keys) > 2 else None,
-                    "linked_account":   keys[3] if len(keys) > 3 else None,
-                    "amount":           float(metrics["Amount"]),
-                    "unit":             metrics["Unit"],
-                    "estimated":        estimated,
-                    "ingested_at":      ingested_at,
+                    "time_period_end": period_end,
+                    "service": keys[0] if len(keys) > 0 else None,
+                    "region": keys[1] if len(keys) > 1 else None,
+                    "usage_type": keys[2] if len(keys) > 2 else None,
+                    "linked_account": keys[3] if len(keys) > 3 else None,
+                    "amount": float(metrics["Amount"]),
+                    "unit": metrics["Unit"],
+                    "estimated": estimated,
+                    "ingested_at": ingested_at,
                 }
 
         next_token = response.get("NextPageToken")
@@ -187,6 +190,7 @@ def fetch_cost_and_usage(
 # Helper: Collect all OU records into a Python list (driver-side)
 ###############################################################################
 
+
 def collect_all_billing_records() -> list[dict]:
     """
     Iterate over every OU / account, assume role, call Cost Explorer.
@@ -197,7 +201,9 @@ def collect_all_billing_records() -> list[dict]:
         for account_id, role_arn in accounts.items():
             try:
                 ce_client = get_ce_client(role_arn, account_id)
-                for rec in fetch_cost_and_usage(ce_client, ou, account_id, QUERY_START, QUERY_END):
+                for rec in fetch_cost_and_usage(
+                    ce_client, ou, account_id, QUERY_START, QUERY_END
+                ):
                     records.append(rec)
             except Exception as exc:
                 # Log but continue — one failing account should not abort the pipeline
@@ -208,6 +214,7 @@ def collect_all_billing_records() -> list[dict]:
 ###############################################################################
 # DLT Table: Bronze — raw cost records
 ###############################################################################
+
 
 @dlt.table(
     name=f"{TARGET_CATALOG}.{TARGET_SCHEMA}.aws_billing_bronze",
@@ -233,33 +240,42 @@ def aws_billing_bronze():
 # DLT Table: Silver — deduplicated, typed, enriched
 ###############################################################################
 
+
 @dlt.table(
     name=f"{TARGET_CATALOG}.{TARGET_SCHEMA}.aws_billing_silver",
     comment="Cleaned and deduplicated AWS billing records",
     table_properties={"quality": "silver"},
     partition_cols=["ou", "account_id"],
 )
-@dlt.expect_or_drop("valid_amount",    "amount IS NOT NULL AND amount >= 0")
-@dlt.expect_or_drop("valid_account",   "account_id IS NOT NULL")
-@dlt.expect_or_drop("valid_period",    "time_period_start IS NOT NULL")
+@dlt.expect_or_drop("valid_amount", "amount IS NOT NULL AND amount >= 0")
+@dlt.expect_or_drop("valid_account", "account_id IS NOT NULL")
+@dlt.expect_or_drop("valid_period", "time_period_start IS NOT NULL")
 def aws_billing_silver():
     return (
         dlt.read(f"{TARGET_CATALOG}.{TARGET_SCHEMA}.aws_billing_bronze")
         .withColumn("time_period_start", F.to_date("time_period_start"))
-        .withColumn("time_period_end",   F.to_date("time_period_end"))
-        .withColumn("year",  F.year("time_period_start"))
+        .withColumn("time_period_end", F.to_date("time_period_end"))
+        .withColumn("year", F.year("time_period_start"))
         .withColumn("month", F.month("time_period_start"))
         # Drop duplicate rows that might arise from pipeline retries
-        .dropDuplicates([
-            "ou", "account_id", "time_period_start",
-            "service", "region", "usage_type", "linked_account"
-        ])
+        .dropDuplicates(
+            [
+                "ou",
+                "account_id",
+                "time_period_start",
+                "service",
+                "region",
+                "usage_type",
+                "linked_account",
+            ]
+        )
     )
 
 
 ###############################################################################
 # DLT Table: Gold — aggregated daily cost by OU / account / service
 ###############################################################################
+
 
 @dlt.table(
     name=f"{TARGET_CATALOG}.{TARGET_SCHEMA}.aws_billing_daily_by_service",
@@ -269,7 +285,15 @@ def aws_billing_silver():
 def aws_billing_daily_by_service():
     return (
         dlt.read(f"{TARGET_CATALOG}.{TARGET_SCHEMA}.aws_billing_silver")
-        .groupBy("ou", "account_id", "linked_account", "time_period_start", "service", "year", "month")
+        .groupBy(
+            "ou",
+            "account_id",
+            "linked_account",
+            "time_period_start",
+            "service",
+            "year",
+            "month",
+        )
         .agg(
             F.sum("amount").alias("total_cost_usd"),
             F.countDistinct("usage_type").alias("usage_type_count"),
@@ -281,6 +305,7 @@ def aws_billing_daily_by_service():
 ###############################################################################
 # DLT Table: Gold — monthly OU-level rollup
 ###############################################################################
+
 
 @dlt.table(
     name=f"{TARGET_CATALOG}.{TARGET_SCHEMA}.aws_billing_monthly_by_ou",
@@ -303,6 +328,7 @@ def aws_billing_monthly_by_ou():
 ###############################################################################
 # DLT Table: Gold — top services by spend (last full month)
 ###############################################################################
+
 
 @dlt.table(
     name=f"{TARGET_CATALOG}.{TARGET_SCHEMA}.aws_billing_top_services",

@@ -19,7 +19,7 @@ terraform {
 
 variable "ou_accounts" {
   description = "Map of OU name to list of AWS Account IDs"
-  type = map(list(string))
+  type        = map(list(string))
   default = {
     "production" = ["111111111111", "222222222222"]
     "staging"    = ["333333333333", "444444444444"]
@@ -141,40 +141,40 @@ data "aws_iam_policy_document" "billing_trust" {
 ###############################################################################
 
 resource "aws_iam_policy" "billing_policy" {
-  provider    = aws.management
-  for_each    = local.all_accounts
+  provider = aws.management
+  for_each = local.all_accounts
 
   name        = "${var.billing_role_name}-Policy-${each.value.account_id}"
   description = "Allows Cost Explorer read access for Databricks billing aggregation (OU: ${each.value.ou})"
   policy      = data.aws_iam_policy_document.billing_policy.json
 
   tags = {
-    ManagedBy   = "Terraform"
-    OU          = each.value.ou
-    AccountId   = each.value.account_id
-    Purpose     = "DatabricksBillingAggregation"
+    ManagedBy = "Terraform"
+    OU        = each.value.ou
+    AccountId = each.value.account_id
+    Purpose   = "DatabricksBillingAggregation"
   }
 }
 
 resource "aws_iam_role" "billing_role" {
-  provider    = aws.management
-  for_each    = local.all_accounts
+  provider = aws.management
+  for_each = local.all_accounts
 
   name               = "${var.billing_role_name}-${each.value.account_id}"
   assume_role_policy = data.aws_iam_policy_document.billing_trust.json
   description        = "Billing read role for Databricks (OU: ${each.value.ou}, Account: ${each.value.account_id})"
 
   tags = {
-    ManagedBy   = "Terraform"
-    OU          = each.value.ou
-    AccountId   = each.value.account_id
-    Purpose     = "DatabricksBillingAggregation"
+    ManagedBy = "Terraform"
+    OU        = each.value.ou
+    AccountId = each.value.account_id
+    Purpose   = "DatabricksBillingAggregation"
   }
 }
 
 resource "aws_iam_role_policy_attachment" "billing_attach" {
-  provider   = aws.management
-  for_each   = local.all_accounts
+  provider = aws.management
+  for_each = local.all_accounts
 
   role       = aws_iam_role.billing_role["${each.value.ou}/${each.value.account_id}"].name
   policy_arn = aws_iam_policy.billing_policy["${each.value.ou}/${each.value.account_id}"].arn
