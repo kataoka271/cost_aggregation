@@ -16,3 +16,25 @@ ou_accounts = {
 }
 
 billing_role_name = "DatabricksBillingRole"
+
+###############################################################################
+# Databricks Pipeline Configuration
+###############################################################################
+
+# Databricks workspace URL
+databricks_host = "https://adb-xxxx.azuredatabricks.net"
+
+# Personal access token — prefer setting DATABRICKS_TOKEN env var instead:
+#   export DATABRICKS_TOKEN="dapixxxx"
+# databricks_token = "dapixxxx"
+
+# Unity Catalog destination for billing tables
+target_catalog = "billing"
+target_schema  = "aws_costs"
+
+# Cost Explorer query window
+query_start = "2024-01-01"
+# query_end = "2024-12-31"   # defaults to today if omitted
+
+# Set to true during initial testing; false for scheduled production runs
+pipeline_development_mode = false
