@@ -7,8 +7,9 @@ A pipeline that collects billing data from multiple AWS accounts across Organiza
 ```
 GitHub Actions (on merge to main)
   └─ Terraform
-       ├─ AWS IAM: DatabricksBillingRole-{account_id}  (one per account)
-       │    └─ Trust: Databricks instance profile + ExternalId check
+       ├─ AWS IAM (per account via provider alias)
+       │    └─ DatabricksBillingRole-{account_id}  ← created directly in each account
+       │         └─ Trust: Databricks instance profile + ExternalId check
        └─ Databricks: DLT Pipeline (billing_pipeline.py)
             └─ Bronze → Silver → Gold tables in Unity Catalog
 ```
@@ -40,13 +41,18 @@ Databricks Cluster (instance profile)
 ```
 .
 ├── .github/workflows/
-│   └── deploy.yml               # CI/CD: plan on PR, apply on merge
+│   └── deploy.yml                      # CI/CD: plan on PR, apply on merge
 ├── terraform/
-│   ├── main.tf                  # AWS IAM roles and policies
-│   ├── databricks_pipeline.tf   # Databricks DLT pipeline resource
-│   └── terraform.tfvars         # Environment config — edit this to add accounts
+│   ├── main.tf                         # Per-account provider aliases + module calls
+│   ├── databricks_pipeline.tf          # Databricks DLT pipeline resource
+│   ├── terraform.tfvars                # Environment config — edit when adding accounts
+│   └── modules/
+│       └── billing_role/               # IAM role/policy module (called once per account)
+│           ├── main.tf
+│           ├── variables.tf
+│           └── outputs.tf
 └── databricks/
-    └── billing_pipeline.py      # DLT pipeline (Bronze / Silver / Gold)
+    └── billing_pipeline.py             # DLT pipeline (Bronze / Silver / Gold)
 ```
 
 ## Prerequisites
@@ -58,7 +64,26 @@ Databricks Cluster (instance profile)
 | Databricks workspace | — | Unity Catalog enabled, DLT support |
 | Databricks cluster | — | Instance profile with `sts:AssumeRole` attached |
 
-The Databricks cluster's instance profile must allow assuming billing roles:
+**No AWS management/payer account is required.** Terraform deploys directly into each target account by assuming a Terraform deployer role (`TerraformDeployerRole`) that must exist in each account beforehand.
+
+The Terraform deployer role needs the following IAM permissions in each target account:
+
+```json
+{
+  "Effect": "Allow",
+  "Action": [
+    "iam:CreateRole", "iam:DeleteRole", "iam:GetRole", "iam:TagRole",
+    "iam:CreatePolicy", "iam:DeletePolicy", "iam:GetPolicy",
+    "iam:AttachRolePolicy", "iam:DetachRolePolicy",
+    "iam:ListRolePolicies", "iam:ListAttachedRolePolicies",
+    "iam:GetPolicyVersion", "iam:ListPolicyVersions",
+    "iam:CreatePolicyVersion", "iam:DeletePolicyVersion"
+  ],
+  "Resource": "*"
+}
+```
+
+The Databricks cluster's instance profile must allow assuming billing roles in all target accounts:
 
 ```json
 {
@@ -81,34 +106,35 @@ Push to `main` automatically plans and applies all Terraform changes.
 
 | Name | Type | Value |
 |---|---|---|
-| `AWS_ROLE_ARN` | Secret | IAM role ARN for GitHub OIDC (management account) |
+| `AWS_ROLE_ARN` | Secret | OIDC role ARN in your CI/CD account (must be able to assume each `TerraformDeployerRole`) |
 | `DATABRICKS_HOST` | Secret | `https://adb-xxxx.azuredatabricks.net` |
 | `DATABRICKS_TOKEN` | Secret | Databricks PAT or service principal token |
 | `AWS_REGION` | Variable | `us-east-1` |
 
-**2. Set up AWS OIDC trust** (one-time) so GitHub Actions can assume the management account role without static credentials:
+**2. Set up AWS OIDC trust** (one-time) in the account where `AWS_ROLE_ARN` lives:
 
 ```bash
-# Create the OIDC provider in your management account
+# Create the OIDC provider
 aws iam create-open-id-connect-provider \
   --url https://token.actions.githubusercontent.com \
   --client-id-list sts.amazonaws.com \
   --thumbprint-list 6938fd4d98bab03faadb97b34396831e3780aea1
 
-# Create an IAM role that trusts the OIDC provider scoped to your repo
-# Attach AdministratorAccess or a scoped policy covering iam:*, sts:*
-# Store the role ARN as secret AWS_ROLE_ARN
+# Create an IAM role that trusts the OIDC provider scoped to your repo.
+# The role's permission policy must allow sts:AssumeRole on each TerraformDeployerRole:
+#   "arn:aws:iam::*:role/TerraformDeployerRole"
+# Store the role ARN as secret AWS_ROLE_ARN.
 ```
 
 **3. Add accounts and deploy:**
 
 ```bash
-# 1. Edit terraform/terraform.tfvars — add new account IDs
+# 1. Edit terraform/main.tf and terraform/terraform.tfvars — see "Adding Accounts" below
 # 2. Open a pull request — GitHub Actions posts the Terraform plan as a comment
 # 3. Merge to main — apply runs automatically
 ```
 
-To trigger a manual apply (e.g. a targeted apply for a single resource):
+To trigger a manual apply:
 
 ```
 GitHub → Actions → Deploy Billing Infrastructure → Run workflow
@@ -121,7 +147,8 @@ GitHub → Actions → Deploy Billing Infrastructure → Run workflow
 **1. Authenticate**
 
 ```bash
-aws sso login --profile <management-account-profile>
+# Log in with a profile that can assume TerraformDeployerRole in each target account
+aws sso login --profile <your-profile>
 export DATABRICKS_TOKEN="dapi..."
 ```
 
@@ -132,12 +159,12 @@ databricks_account_id = "000000000000"
 databricks_role_arn   = "arn:aws:iam::000000000000:role/DatabricksInstanceProfileRole"
 databricks_host       = "https://adb-xxxx.azuredatabricks.net"
 
-ou_accounts = {
-  "production" = ["111111111111", "222222222222"]
-  "staging"    = ["444444444444"]
+terraform_role_arns = {
+  "111111111111" = "arn:aws:iam::111111111111:role/TerraformDeployerRole"
+  "222222222222" = "arn:aws:iam::222222222222:role/TerraformDeployerRole"
 }
 
-query_start = "2024-01-01"
+query_start    = "2024-01-01"
 target_catalog = "billing"
 target_schema  = "aws_costs"
 ```
@@ -157,25 +184,64 @@ terraform apply -var-file=terraform.tfvars
 # Pipeline URL in Databricks workspace
 terraform output pipeline_url
 
-# Billing role ARNs in the format expected by the pipeline
-terraform output billing_role_arns_json
+# Billing role ARNs in nested OU → account → ARN format
+terraform output billing_role_arns_nested
 ```
 
 ## Adding Accounts
 
-1. Edit `terraform/terraform.tfvars` — append account IDs to an existing OU or add a new OU:
+Adding an account requires 4 edits, all in `terraform/`:
 
-   ```hcl
-   ou_accounts = {
-     "production"  = ["111111111111", "222222222222", "999999999999"]  # added
-     "staging"     = ["444444444444"]
-     "compliance"  = ["777777777777", "888888888888"]                  # new OU
-   }
-   ```
+**1. `main.tf` — add a provider alias**
 
-2. Open a pull request — the workflow posts a plan showing new `aws_iam_role` resources and the updated `billing_role_arns` pipeline configuration.
+```hcl
+provider "aws" {
+  alias  = "account_999999999999"
+  region = "us-east-1"
+  assume_role {
+    role_arn = var.terraform_role_arns["999999999999"]
+  }
+}
+```
 
-3. Merge — the new roles are created and the pipeline configuration is updated automatically.
+**2. `main.tf` — add a module call**
+
+```hcl
+module "billing_999999999999" {
+  source    = "./modules/billing_role"
+  providers = { aws = aws.account_999999999999 }
+
+  ou                  = "new-ou"          # OU this account belongs to
+  account_id          = "999999999999"
+  billing_role_name   = var.billing_role_name
+  databricks_role_arn = var.databricks_role_arn
+}
+```
+
+**3. `main.tf` — add entries to both locals maps**
+
+```hcl
+billing_role_arns_flat = {
+  ...
+  "new-ou/999999999999" = module.billing_999999999999.role_arn
+}
+
+all_accounts = {
+  ...
+  "new-ou/999999999999" = { ou = "new-ou", account_id = "999999999999" }
+}
+```
+
+**4. `terraform.tfvars` — add the Terraform deployer role ARN**
+
+```hcl
+terraform_role_arns = {
+  ...
+  "999999999999" = "arn:aws:iam::999999999999:role/TerraformDeployerRole"
+}
+```
+
+Then open a PR — the plan will show the new IAM role and updated pipeline config. Merge to apply.
 
 ## Pipeline Configuration Reference
 
@@ -192,7 +258,12 @@ All pipeline parameters are set via Terraform and passed as `spark.conf` entries
 
 ## Troubleshooting
 
-**AssumeRole failures**
+**AssumeRole failures (Terraform)**
+1. Verify each `TerraformDeployerRole` has the required IAM permissions listed in Prerequisites
+2. Confirm the caller identity (OIDC role or SSO profile) can assume `TerraformDeployerRole` in each target account
+3. Check that `terraform_role_arns` in `terraform.tfvars` contains an entry for every account defined in `main.tf`
+
+**AssumeRole failures (Databricks pipeline)**
 1. Verify `databricks_role_arn` in `terraform.tfvars` matches the cluster's actual instance profile ARN
 2. Confirm `external_id` is identical in both the Terraform trust policy and the pipeline parameter
 3. Check the cluster instance profile has `sts:AssumeRole` on `arn:aws:iam::*:role/DatabricksBillingRole-*`
@@ -204,10 +275,3 @@ All pipeline parameters are set via Terraform and passed as `spark.conf` entries
 **Rows dropped in Silver layer**
 - Check the auto-generated quarantine table: `SELECT * FROM billing.aws_costs.aws_billing_silver_quarantine`
 - Common cause: services with zero usage that day produce null amounts — adjust or remove the `@dlt.expect_or_drop` gate in `billing_pipeline.py`
-
-**Multi-account deployment note**
-
-The Terraform in this repo creates all IAM resources using the management account provider as a single-account demonstration. For production cross-account deployments, use one of:
-- **Terragrunt** — per-account `assume_role` blocks with DRY config
-- **AWS CloudFormation StackSets** — native cross-account stack deployment
-- **Provider aliases** — one `provider "aws"` block per account (see `terraform/main.tf` lines 131–140)
