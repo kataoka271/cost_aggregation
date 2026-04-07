@@ -1,0 +1,167 @@
+###############################################################################
+# Deploy AWS IAM Billing Roles + Databricks DLT Pipeline
+#
+# Triggers:
+#   - Push to main: runs plan then apply (full deploy)
+#   - Pull request: runs plan only (review before merge)
+#   - Manual dispatch: allows targeted apply with optional -target flag
+#
+# Required repository secrets:
+#   AWS_ROLE_ARN          - IAM role ARN to assume via OIDC (management account)
+#   DATABRICKS_HOST       - Databricks workspace URL
+#   DATABRICKS_TOKEN      - Databricks personal access token or SP secret
+#
+# Required repository variables (Settings → Variables):
+#   AWS_REGION            - e.g. us-east-1
+###############################################################################
+
+name: Deploy Billing Infrastructure
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "terraform/**"
+      - "databricks/billing_pipeline.py"
+      - ".github/workflows/deploy.yml"
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "terraform/**"
+      - "databricks/billing_pipeline.py"
+      - ".github/workflows/deploy.yml"
+  workflow_dispatch:
+    inputs:
+      terraform_target:
+        description: "Optional -target resource (e.g. aws_iam_role.billing_role). Leave empty to apply all."
+        required: false
+        default: ""
+      plan_only:
+        description: "Run plan only, skip apply"
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  id-token: write   # Required for OIDC AWS authentication
+  contents: read
+  pull-requests: write  # Required to post plan output as PR comment
+
+env:
+  TF_VAR_databricks_host: ${{ secrets.DATABRICKS_HOST }}
+  TF_VAR_databricks_token: ${{ secrets.DATABRICKS_TOKEN }}
+  DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+  AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+
+jobs:
+  terraform:
+    name: Terraform ${{ github.event_name == 'pull_request' && 'Plan' || 'Apply' }}
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: terraform
+
+    steps:
+      ###########################################################################
+      # Checkout
+      ###########################################################################
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      ###########################################################################
+      # AWS authentication via OIDC (no long-lived credentials stored in secrets)
+      ###########################################################################
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      ###########################################################################
+      # Terraform setup
+      ###########################################################################
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.5"
+
+      - name: Terraform Init
+        id: init
+        run: terraform init -input=false
+
+      - name: Terraform Validate
+        id: validate
+        run: terraform validate
+
+      ###########################################################################
+      # Plan — runs on every trigger; output posted as PR comment
+      ###########################################################################
+      - name: Terraform Plan
+        id: plan
+        run: |
+          TARGET_FLAG=""
+          if [[ -n "${{ github.event.inputs.terraform_target }}" ]]; then
+            TARGET_FLAG="-target=${{ github.event.inputs.terraform_target }}"
+          fi
+          terraform plan -input=false -no-color -out=tfplan $TARGET_FLAG
+        env:
+          TF_VAR_databricks_host: ${{ secrets.DATABRICKS_HOST }}
+          TF_VAR_databricks_token: ${{ secrets.DATABRICKS_TOKEN }}
+        continue-on-error: true
+
+      - name: Post plan to PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { execSync } = require('child_process');
+            const plan = execSync('terraform show -no-color tfplan', { cwd: 'terraform' }).toString();
+            const status = '${{ steps.plan.outcome }}';
+            const body = `## Terraform Plan
+
+            **Validate:** \`${{ steps.validate.outcome }}\`
+            **Plan:** \`${status}\`
+
+            <details><summary>Show plan</summary>
+
+            \`\`\`terraform
+            ${plan.slice(0, 60000)}
+            \`\`\`
+
+            </details>
+
+            > Triggered by @${{ github.actor }} on \`${{ github.head_ref }}\``;
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body,
+            });
+
+      - name: Fail if plan errored
+        if: steps.plan.outcome == 'failure'
+        run: exit 1
+
+      ###########################################################################
+      # Apply — only on push to main or approved manual dispatch
+      ###########################################################################
+      - name: Terraform Apply
+        if: |
+          (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+          (github.event_name == 'workflow_dispatch' && github.event.inputs.plan_only != 'true')
+        run: terraform apply -input=false -auto-approve tfplan
+        env:
+          TF_VAR_databricks_host: ${{ secrets.DATABRICKS_HOST }}
+          TF_VAR_databricks_token: ${{ secrets.DATABRICKS_TOKEN }}
+
+      ###########################################################################
+      # Surface outputs for observability
+      ###########################################################################
+      - name: Show outputs
+        if: |
+          (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+          (github.event_name == 'workflow_dispatch' && github.event.inputs.plan_only != 'true')
+        run: terraform output -no-color
