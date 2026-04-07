@@ -9,15 +9,6 @@
 #   - Databricks cluster with instance profile matching databricks_role_arn
 ###############################################################################
 
-terraform {
-  required_providers {
-    databricks = {
-      source  = "databricks/databricks"
-      version = "~> 1.0"
-    }
-  }
-}
-
 ###############################################################################
 # Variables
 ###############################################################################
