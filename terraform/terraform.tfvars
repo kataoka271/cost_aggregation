@@ -8,14 +8,20 @@ databricks_account_id = "000000000000"
 # Instance profile role ARN attached to the Databricks cluster
 databricks_role_arn = "arn:aws:iam::000000000000:role/DatabricksInstanceProfileRole"
 
-# OU name → list of AWS Account IDs to grant billing access
-ou_accounts = {
-  "production" = ["111111111111", "222222222222", "333333333333"]
-  "staging"    = ["444444444444", "555555555555"]
-  "sandbox"    = ["666666666666"]
-}
-
 billing_role_name = "DatabricksBillingRole"
+
+# Terraform deployer role in each target account.
+# Terraform assumes this role to create the billing IAM role/policy.
+# The role needs: iam:CreateRole, iam:CreatePolicy, iam:AttachRolePolicy,
+#                 iam:GetRole, iam:GetPolicy, iam:ListRolePolicies, iam:DeleteRole, etc.
+terraform_role_arns = {
+  "111111111111" = "arn:aws:iam::111111111111:role/TerraformDeployerRole"
+  "222222222222" = "arn:aws:iam::222222222222:role/TerraformDeployerRole"
+  "333333333333" = "arn:aws:iam::333333333333:role/TerraformDeployerRole"
+  "444444444444" = "arn:aws:iam::444444444444:role/TerraformDeployerRole"
+  "555555555555" = "arn:aws:iam::555555555555:role/TerraformDeployerRole"
+  "666666666666" = "arn:aws:iam::666666666666:role/TerraformDeployerRole"
+}
 
 ###############################################################################
 # Databricks Pipeline Configuration

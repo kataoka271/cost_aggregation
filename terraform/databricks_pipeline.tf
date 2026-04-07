@@ -82,28 +82,15 @@ provider "databricks" {
 }
 
 ###############################################################################
-# Local: reshape flat billing_role_arns into nested OU -> account_id -> ARN map
-#
-# aws_iam_role.billing_role keys are "ou_name/account_id" (from local.all_accounts).
-# The pipeline expects:
-#   { "production": { "111111111111": "arn:aws:iam::...:role/..." }, ... }
+# Local
 ###############################################################################
 
 locals {
-  ou_names = distinct([for v in values(local.all_accounts) : v.ou])
-
-  billing_role_arns_nested = {
-    for ou_name in local.ou_names :
-    ou_name => {
-      for key, role in aws_iam_role.billing_role :
-      local.all_accounts[key].account_id => role.arn
-      if local.all_accounts[key].ou == ou_name
-    }
-  }
-
   # Use today's date when query_end is not specified
   effective_query_end = var.query_end != "" ? var.query_end : formatdate("YYYY-MM-DD", timestamp())
 }
+
+# Note: local.billing_role_arns_nested is defined in main.tf
 
 ###############################################################################
 # Upload pipeline notebook to Databricks workspace
